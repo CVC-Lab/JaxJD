@@ -5,9 +5,11 @@ from the paper [*Jacobian Descent for Multi-Objective Optimization*](https://arx
 (Quinton & Rey, 2024).
 
 This is a JAX equivalent of [`torchjd.aggregation.UPGrad`](https://github.com/TorchJD/torchjd).
-The QP solver uses [qpax](https://github.com/kevin-tracy/qpax) (primal-dual interior
-point method), which is a direct solver equivalent to the `quadprog` used by TorchJD ---
-producing solutions exact to machine precision (~1e-12 in float64).
+Two QP solvers are available:
+- **qpax** (default): Primal-dual interior point method. Direct solver equivalent to
+  `quadprog` used by TorchJD --- exact to machine precision (~1e-12 in float64).
+- **nesterov_pgd**: Nesterov-accelerated projected gradient descent. Pure JAX with no
+  external dependencies --- accurate to ~1e-10, faster on small problems.
 
 ---
 
@@ -23,10 +25,16 @@ producing solutions exact to machine precision (~1e-12 in float64).
 
 ## 1. Installation
 
-JaxJD requires JAX and qpax:
+JaxJD requires JAX. The default solver also requires qpax:
 
 ```bash
 pip install jax jaxlib qpax
+```
+
+If you only want the `nesterov_pgd` solver (no extra dependencies beyond JAX):
+
+```bash
+pip install jax jaxlib
 ```
 
 Then import from the `JaxJD` folder:
@@ -49,8 +57,12 @@ from JaxJD.upgrad import upgrad
 J = jnp.array([[-4.0, 1.0, 1.0],
                [ 6.0, 1.0, 1.0]])
 
-# Aggregate into a single update direction
+# Aggregate using qpax (default, exact)
 result = upgrad(J)
+print(result)  # [0.2929, 1.9004, 1.9004]
+
+# Or use Nesterov PGD (no extra dependencies, slightly less precise)
+result = upgrad(J, solver="nesterov_pgd")
 print(result)  # [0.2929, 1.9004, 1.9004]
 ```
 
@@ -159,7 +171,10 @@ gradient of loss 2.
 ### 3.6. Aggregate with UPGrad
 
 ```python
-aggregated = upgrad(jacobian)  # Shape: (total_params,)
+aggregated = upgrad(jacobian)  # default: solver="qpax" (exact)
+
+# Or with Nesterov PGD:
+# aggregated = upgrad(jacobian, solver="nesterov_pgd")
 ```
 
 This single line does all the math (see [Algorithm](ALGORITHM.md) for details). The
@@ -246,9 +261,16 @@ code maps to the equations --- see:
 (the set of "safe" directions that do not worsen any loss), then averages the results.
 The projection is computed efficiently by solving a small quadratic program (QP) in
 m-dimensional space (m = number of losses) using the Gramian matrix G = J J^T, rather
-than working in n-dimensional parameter space. JaxJD solves this QP using
-[qpax](https://github.com/kevin-tracy/qpax), a JAX-native primal-dual interior point
-solver that produces exact solutions and is JIT/vmap compatible.
+than working in n-dimensional parameter space.
+
+JaxJD provides two QP solvers:
+
+| Solver | Method | Precision | Dependencies | Best for |
+|---|---|---|---|---|
+| `"qpax"` (default) | Primal-dual interior point | Exact (~1e-12) | `qpax` | Matching TorchJD exactly |
+| `"nesterov_pgd"` | Nesterov accelerated PGD | ~1e-10 | None (pure JAX) | Zero-dependency setups |
+
+Both are JIT-compilable and vmap-compatible.
 
 ---
 
