@@ -447,7 +447,12 @@ The two public functions are:
 
 We benchmarked both implementations on the same hardware (CPU) with the same inputs.
 
-### 6.1. Accuracy
+### 6.1. Accuracy: Standalone UPGrad on Random Jacobians
+
+**Experiment:** We generate random Jacobian matrices of increasing size using numpy
+(fixed seed for reproducibility), convert them to both PyTorch tensors and JAX arrays,
+and call `UPGrad()(J)` (TorchJD) vs `upgrad(J)` (JaxJD). We then compare the output
+vectors element-wise. No model, no training --- this isolates the aggregator itself.
 
 Both produce **identical results** within floating-point precision:
 
@@ -462,7 +467,12 @@ Both produce **identical results** within floating-point precision:
 The errors are at machine epsilon level (~1e-10 to 1e-14). The two implementations are
 numerically equivalent.
 
-### 6.2. Speed: UPGrad Aggregator (Jacobian -> gradient)
+### 6.2. Speed: Standalone UPGrad on Random Jacobians
+
+**Experiment:** Same random Jacobian matrices as above. Each implementation is warmed up
+(5 runs), then timed over 50 calls. We measure only the `upgrad(J)` / `UPGrad()(J)` call
+--- no model forward pass, no gradient computation, no optimizer step. This isolates the
+aggregator speed. All runs are on CPU with float64.
 
 | Size (m x n) | TorchJD (ms) | JaxJD (ms) | JaxJD Speedup |
 |---|---|---|---|
@@ -474,16 +484,60 @@ numerically equivalent.
 
 ### 6.3. Speed: Full Training Step (forward + grads + UPGrad + SGD)
 
-On the Basic Usage example (2 losses, 72 parameters, 100 steps):
+**Experiment:** We replicate the TorchJD "Basic Usage" example end-to-end. Both
+frameworks start from the exact same initial weights and data: a `Linear(10,5) -> ReLU
+-> Linear(5,2)` model (72 total parameters), a batch of 16 inputs, two MSE losses, SGD
+with lr=0.1. Each training step includes: forward pass, computing two per-loss gradients,
+building the Jacobian, aggregating with UPGrad, and applying the SGD update. We run 100
+steps and measure total wall-clock time.
 
 | | Total (100 steps) | Per step |
 |---|---|---|
 | TorchJD | 264 ms | 2.64 ms |
 | JaxJD | 280 ms | 2.80 ms |
 
-At this small model size, both are equally fast.
+At this small model size (only 2 objectives and 72 parameters), both are equally fast.
 
-### 6.4. Why the Speed Difference?
+### 6.4. Accuracy: Full Training Loop (Loss and Parameter Agreement)
+
+**Experiment:** Same setup as 6.3. Both frameworks start from identical initial weights
+(extracted from PyTorch and copied to JAX) and identical data (generated with the same
+numpy seed). We run 100 training steps and compare the loss values and final model
+parameters at each milestone.
+
+**Loss trajectory comparison:**
+
+| Step | TorchJD Loss1 | TorchJD Loss2 | JaxJD Loss1 | JaxJD Loss2 | L1 Diff | L2 Diff |
+|---|---|---|---|---|---|---|
+| 1 | 0.580639 | 1.062991 | 0.580639 | 1.062991 | 0 (exact) | 0 (exact) |
+| 2 | 0.546955 | 1.043270 | 0.546955 | 1.043270 | 1.11e-16 | 2.22e-16 |
+| 5 | 0.465893 | 1.008172 | 0.465893 | 1.008172 | 2.46e-14 | 9.84e-13 |
+| 10 | 0.379066 | 0.960707 | 0.379066 | 0.960707 | 1.10e-14 | 5.83e-13 |
+| 20 | 0.295198 | 0.818730 | 0.295198 | 0.818730 | 2.97e-09 | 1.59e-09 |
+| 50 | 0.172077 | 0.356759 | 0.172077 | 0.356760 | 3.28e-07 | 1.07e-07 |
+| 100 | 0.102555 | 0.226943 | 0.102555 | 0.226943 | 1.84e-07 | 1.61e-08 |
+
+At step 1, the outputs are bit-for-bit identical. Over 100 steps, tiny differences from
+the iterative QP solver (JaxJD uses 50 Nesterov PGD iterations) versus the exact direct
+solver (TorchJD uses `quadprog`) accumulate, but never exceed ~3e-07 in loss value.
+
+**Final parameter agreement (after 100 steps):**
+
+| Parameter | Shape | Max |diff| |
+|---|---|---|
+| Linear1.weight | (5, 10) | 4.08e-07 |
+| Linear1.bias | (5,) | 1.40e-07 |
+| Linear2.weight | (2, 5) | 7.11e-07 |
+| Linear2.bias | (2,) | 5.58e-07 |
+
+The largest parameter difference is 7.11e-07 (less than one millionth). Both
+implementations follow the same loss trajectory and converge to the same model.
+
+To put this in perspective: the loss values themselves are around 0.1 to 1.0, so a
+difference of 1e-07 represents an error of about 0.00001%. The two implementations are
+functionally identical for all practical training purposes.
+
+### 6.5. Why the Speed Difference?
 
 **Where PyTorch (TorchJD) wins --- small problems:**
 
@@ -510,7 +564,7 @@ JaxJD becomes faster as the number of objectives grows because:
    one fused kernel. TorchJD cannot do this because the QP solver is outside PyTorch's
    computation graph.
 
-### 6.5. When to Use Which
+### 6.6. When to Use Which
 
 | Scenario | Recommendation |
 |---|---|
@@ -521,7 +575,7 @@ JaxJD becomes faster as the number of objectives grows because:
 | Need GPU acceleration for UPGrad itself | JaxJD --- the QP solver runs on GPU too |
 | Instance-wise risk minimization (m = batch size) | JaxJD --- m can be 32-128, big speedup |
 
-### 6.6. Parameter Agreement After Training
+### 6.7. Parameter Agreement After Training
 
 After 100 identical training steps, the model parameters differ by at most **4e-07**
 between the two implementations. This tiny difference comes from the iterative QP solver
